@@ -1,5 +1,32 @@
 {
-  "asets": [],
+  "asets": [
+    {
+      "id": "ast-test-1",
+      "desaId": "desa-21",
+      "desaName": "Tetesua",
+      "klasifikasi": "Tanah",
+      "namaAset": "Tanah Kas Desa",
+      "kodeAset": "01.01.01.21.0001",
+      "bukti": {
+        "jenis": "Sertifikat",
+        "nomor": "123",
+        "tanggal": "2026-01-01"
+      },
+      "tahunPerolehan": 2026,
+      "nilaiPerolehan": 50000000,
+      "kondisi": "Baik",
+      "sumberDana": "DDS",
+      "volume": "500 m2",
+      "lokasi": "Dusun I",
+      "keterangan": "Tanah Balai",
+      "fotoAset": [
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+      ],
+      "status": "aktif",
+      "createdAt": "2026-09-21T14:30:00.000Z",
+      "updatedAt": "2026-09-21T14:30:00.000Z"
+    }
+  ],
   "verifikasiList": [],
   "pengesahanList": [],
   "users": [
@@ -654,16 +681,16 @@
   "kecamatanProfile": {
     "namaKecamatan": "KECAMATAN SIROMBU",
     "kabupaten": "PEMERINTAH KABUPATEN NIAS BARAT",
-    "namaCamat": "MESRAWAN HAREFA, S.Pd., M.M.",
-    "pangkatCamat": "Pembina, IV/a",
-    "nipCamat": "19780512 200501 1 008",
+    "namaCamat": "BEMIN FETARO DAELI, S.Pd",
+    "pangkatCamat": "PENATA TK. I",
+    "nipCamat": "19880521 201503 1 002",
     "jabatanCamat": "CAMAT SIROMBU",
     "alamatKantor": "Tetesua Desa Tegideu Kec. Sirombu Kabupaten Nias Barat",
     "kodePos": "22863",
-    "emailKantor": "kecamatan.sirombu@niasbaratkab.go.id",
+    "emailKantor": "kecamatansirombu2023@gmail.com",
     "teleponKantor": "0813 6699 8787",
     "tempatSurat": "Tetesua"
   },
   "selectedYear": 2026,
-  "updatedAt": "2026-09-21T14:23:45.645Z"
+  "updatedAt": "2026-09-21T14:36:50.913Z"
 }

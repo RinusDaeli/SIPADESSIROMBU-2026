@@ -18,6 +18,24 @@ import {
   INITIAL_KECAMATAN_PROFILE,
 } from '../data/initialData';
 import { formatTanggalIndonesia } from '../utils/reportGenerator';
+import {
+  subscribeAsets,
+  subscribeVerifikasi,
+  subscribePengesahan,
+  subscribeDesas,
+  subscribeKecamatanProfile,
+  subscribeUsers,
+  saveAsetToCloud,
+  deleteAsetFromCloud,
+  saveVerifikasiToCloud,
+  deleteVerifikasiFromCloud,
+  savePengesahanToCloud,
+  saveDesaToCloud,
+  saveKecamatanProfileToCloud,
+  saveUserToCloud,
+  deleteUserFromCloud,
+  bootstrapFirestoreIfEmpty,
+} from '../lib/firestoreService';
 
 export interface AuthSession {
   user: User;
@@ -345,6 +363,82 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, []);
 
+  // Cloud Firestore Real-Time Multi-Device Synchronization
+  useEffect(() => {
+    bootstrapFirestoreIfEmpty();
+
+    const unsubAsets = subscribeAsets((cloudAsets) => {
+      if (cloudAsets) {
+        setAsets((prev) => {
+          if (JSON.stringify(prev) === JSON.stringify(cloudAsets)) return prev;
+          localStorage.setItem(STORAGE_KEYS.ASETS, JSON.stringify(cloudAsets));
+          return cloudAsets;
+        });
+        setIsServerConnected(true);
+        setLastSyncTime(new Date());
+      }
+    });
+
+    const unsubVerif = subscribeVerifikasi((cloudVerif) => {
+      if (cloudVerif) {
+        setVerifikasiList((prev) => {
+          if (JSON.stringify(prev) === JSON.stringify(cloudVerif)) return prev;
+          localStorage.setItem(STORAGE_KEYS.VERIFIKASI, JSON.stringify(cloudVerif));
+          return cloudVerif;
+        });
+      }
+    });
+
+    const unsubPengesahan = subscribePengesahan((cloudPengesahan) => {
+      if (cloudPengesahan) {
+        setPengesahanList((prev) => {
+          if (JSON.stringify(prev) === JSON.stringify(cloudPengesahan)) return prev;
+          localStorage.setItem(STORAGE_KEYS.PENGESAHAN, JSON.stringify(cloudPengesahan));
+          return cloudPengesahan;
+        });
+      }
+    });
+
+    const unsubDesas = subscribeDesas((cloudDesas) => {
+      if (cloudDesas && cloudDesas.length > 0) {
+        setDesas((prev) => {
+          if (JSON.stringify(prev) === JSON.stringify(cloudDesas)) return prev;
+          localStorage.setItem(STORAGE_KEYS.DESAS, JSON.stringify(cloudDesas));
+          return cloudDesas;
+        });
+      }
+    });
+
+    const unsubKecamatan = subscribeKecamatanProfile((cloudProfile) => {
+      if (cloudProfile && cloudProfile.namaKecamatan) {
+        setKecamatanProfile((prev) => {
+          if (JSON.stringify(prev) === JSON.stringify(cloudProfile)) return prev;
+          localStorage.setItem(STORAGE_KEYS.KECAMATAN_PROFILE, JSON.stringify(cloudProfile));
+          return cloudProfile;
+        });
+      }
+    });
+
+    const unsubUsers = subscribeUsers((cloudUsers) => {
+      if (cloudUsers && cloudUsers.length > 0) {
+        setUsers((prev) => {
+          if (JSON.stringify(prev) === JSON.stringify(cloudUsers)) return prev;
+          localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(cloudUsers));
+          return cloudUsers;
+        });
+      }
+    });
+
+    return () => {
+      unsubAsets();
+      unsubVerif();
+      unsubPengesahan();
+      unsubDesas();
+      unsubKecamatan();
+      unsubUsers();
+    };
+  }, []);
+
   // Initial load and periodic polling (every 15 seconds)
   useEffect(() => {
     refreshServerData();
@@ -439,7 +533,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     setUsers((prev) => [newUser, ...prev]);
 
-    // Push to server
+    // Push to Google Cloud Firestore & local server
+    saveUserToCloud(newUser).catch((e) => console.warn('[Cloud] User add failed:', e));
     fetch('/api/users', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -458,8 +553,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: 'Hanya Super Admin yang dapat menetapkan peran Super Admin!' };
     }
 
+    const updatedUser = { ...target, ...data } as User;
     setUsers((prev) =>
-      prev.map((u) => (u.id === id ? { ...u, ...data } : u))
+      prev.map((u) => (u.id === id ? updatedUser : u))
     );
 
     if (currentUser?.id === id) {
@@ -477,7 +573,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
 
-    // Push to server
+    // Push to Google Cloud Firestore & local server
+    if (target) {
+      saveUserToCloud(updatedUser).catch((e) => console.warn('[Cloud] User update failed:', e));
+    }
     fetch(`/api/users/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -505,6 +604,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setUsers((prev) => prev.filter((u) => u.id !== id));
 
+    deleteUserFromCloud(id).catch((e) => console.warn('[Cloud] User delete failed:', e));
     fetch(`/api/users/${id}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
@@ -529,7 +629,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setAsets((prev) => [newAset, ...prev]);
 
-    // Push to central server so admin sees it instantly from anywhere
+    // Push to Google Cloud Firestore so Admin laptop and all Desa users receive it in real time
+    saveAsetToCloud(newAset).catch((err) => console.warn('[Cloud] Aset save failed:', err));
+
+    // Secondary local server sync
     fetch('/api/asets', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -551,6 +654,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
       const target = updated.find((a) => a.id === id);
       if (target) {
+        saveAsetToCloud(target).catch((err) => console.warn('[Cloud] Aset update failed:', err));
         fetch(`/api/asets/${id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
@@ -572,6 +676,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     setAsets((prev) => prev.filter((a) => a.id !== id));
 
+    deleteAsetFromCloud(id).catch((err) => console.warn('[Cloud] Aset delete failed:', err));
     fetch(`/api/asets/${id}`, {
       method: 'DELETE',
     }).catch((e) => console.warn('[Sync] Asset delete failed:', e));
@@ -608,6 +713,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setVerifikasiList((prev) => [newReq, ...prev]);
     updateAset(asetId, { status: 'mutasi_diajukan' });
 
+    saveVerifikasiToCloud(newReq).catch((err) => console.warn('[Cloud] Verifikasi save failed:', err));
     fetch('/api/verifikasi', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -641,6 +747,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setVerifikasiList((prev) => [newReq, ...prev]);
     updateAset(asetId, { status: 'terhapus_diajukan' });
 
+    saveVerifikasiToCloud(newReq).catch((err) => console.warn('[Cloud] Verifikasi save failed:', err));
     fetch('/api/verifikasi', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -661,21 +768,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const now = new Date().toISOString();
     const finalSK = nomorSKKecamatan || (status === 'disetujui' ? `SK-KEC-SRB/${new Date().getFullYear()}/${verif.id.slice(-4)}` : undefined);
 
+    const updatedVerif: PermohonanVerifikasi = {
+      ...verif,
+      status,
+      tanggalDiproses: now,
+      diverifikasiOleh: verifierName,
+      catatanKecamatan,
+      nomorSKKecamatan: finalSK,
+    };
+
     setVerifikasiList((prev) =>
-      prev.map((v) =>
-        v.id === verifikasiId
-          ? {
-              ...v,
-              status,
-              tanggalDiproses: now,
-              diverifikasiOleh: verifierName,
-              catatanKecamatan,
-              nomorSKKecamatan: finalSK,
-            }
-          : v
-      )
+      prev.map((v) => (v.id === verifikasiId ? updatedVerif : v))
     );
 
+    saveVerifikasiToCloud(updatedVerif).catch((err) => console.warn('[Cloud] Verifikasi update failed:', err));
     fetch(`/api/verifikasi/${verifikasiId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -742,16 +848,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const desaName = desa ? desa.name : 'DESA';
     const existing = pengesahanList.find((p) => p.desaId === desaId && p.tahun === tahun);
 
+    let targetPengesahan: PengesahanLaporan;
     if (existing) {
+      targetPengesahan = { ...existing, status: 'diajukan', diajukanPada: new Date().toISOString() };
       setPengesahanList((prev) =>
-        prev.map((p) =>
-          p.id === existing.id
-            ? { ...p, status: 'diajukan', diajukanPada: new Date().toISOString() }
-            : p
-        )
+        prev.map((p) => (p.id === existing.id ? targetPengesahan : p))
       );
     } else {
-      const newPengesahan: PengesahanLaporan = {
+      targetPengesahan = {
         id: `png-${desaId}-${tahun}`,
         desaId,
         desaName,
@@ -759,8 +863,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         status: 'diajukan',
         diajukanPada: new Date().toISOString(),
       };
-      setPengesahanList((prev) => [newPengesahan, ...prev]);
+      setPengesahanList((prev) => [targetPengesahan, ...prev]);
     }
+    savePengesahanToCloud(targetPengesahan).catch((e) => console.warn('[Cloud] Pengesahan save failed:', e));
   };
 
   const prosesPengesahan = (
@@ -773,23 +878,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const verifierName = currentUser?.name || 'Dodi Tribuana (Admin Kecamatan Sirombu)';
     const now = new Date().toISOString();
 
+    let targetPengesahan: PengesahanLaporan;
     if (existing) {
+      targetPengesahan = {
+        ...existing,
+        status,
+        catatanKecamatan: catatan,
+        disetujuiPada: status === 'disetujui' ? now : undefined,
+        disetujuiOleh: status === 'disetujui' ? verifierName : undefined,
+      };
       setPengesahanList((prev) =>
-        prev.map((p) =>
-          p.id === existing.id
-            ? {
-                ...p,
-                status,
-                catatanKecamatan: catatan,
-                disetujuiPada: status === 'disetujui' ? now : undefined,
-                disetujuiOleh: status === 'disetujui' ? verifierName : undefined,
-              }
-            : p
-        )
+        prev.map((p) => (p.id === existing.id ? targetPengesahan : p))
       );
     } else {
       const desa = desas.find((d) => d.id === desaId);
-      const newPengesahan: PengesahanLaporan = {
+      targetPengesahan = {
         id: `png-${desaId}-${tahun}`,
         desaId,
         desaName: desa?.name || 'DESA',
@@ -799,8 +902,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         disetujuiPada: status === 'disetujui' ? now : undefined,
         disetujuiOleh: status === 'disetujui' ? verifierName : undefined,
       };
-      setPengesahanList((prev) => [newPengesahan, ...prev]);
+      setPengesahanList((prev) => [targetPengesahan, ...prev]);
     }
+    savePengesahanToCloud(targetPengesahan).catch((e) => console.warn('[Cloud] Pengesahan save failed:', e));
   };
 
   const updateDesa = (id: string, data: Partial<Desa>) => {
@@ -814,6 +918,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const target = desas.find((d) => d.id === id);
     const updated = target ? { ...target, ...data } : null;
     if (updated) {
+      saveDesaToCloud(updated).catch((e) => console.warn('[Cloud] Desa save failed:', e));
       fetch('/api/desa/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -837,23 +942,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!target) return { success: false, message: 'Permohonan mutasi tidak ditemukan!' };
 
     const now = new Date().toISOString();
+    const updatedVerif: PermohonanVerifikasi = {
+      ...target,
+      alasan: data.alasan,
+      nomorSuratDesa: data.nomorSuratDesa,
+      dokumenPendukung: data.dokumenPendukung,
+      tujuanMutasi: data.tujuanMutasi ?? target.tujuanMutasi,
+      status: 'menunggu_verifikasi',
+      tanggalPengajuan: now,
+      tanggalDiproses: undefined,
+      diverifikasiOleh: undefined,
+      nomorSKKecamatan: undefined,
+    };
+
     setVerifikasiList((prev) =>
-      prev.map((v) =>
-        v.id === verifikasiId
-          ? {
-              ...v,
-              alasan: data.alasan,
-              nomorSuratDesa: data.nomorSuratDesa,
-              dokumenPendukung: data.dokumenPendukung,
-              tujuanMutasi: data.tujuanMutasi ?? v.tujuanMutasi,
-              status: 'menunggu_verifikasi' as const,
-              tanggalPengajuan: now,
-              tanggalDiproses: undefined,
-              diverifikasiOleh: undefined,
-              nomorSKKecamatan: undefined,
-            }
-          : v
-      )
+      prev.map((v) => (v.id === verifikasiId ? updatedVerif : v))
     );
 
     const newStatus = target.tipe === 'mutasi' ? 'mutasi_diajukan' : 'terhapus_diajukan';
@@ -862,6 +965,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       keterangan: `${target.asetSnapshot.keterangan || ''} (Revisi permohonan telah diajukan kembali ke Kecamatan Sirombu)`,
     });
 
+    saveVerifikasiToCloud(updatedVerif).catch((e) => console.warn('[Cloud] Revisi verifikasi failed:', e));
     fetch(`/api/verifikasi/${verifikasiId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -891,6 +995,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setVerifikasiList((prev) => prev.filter((v) => v.id !== verifikasiId));
 
+    deleteVerifikasiFromCloud(verifikasiId).catch((e) => console.warn('[Cloud] Delete verifikasi failed:', e));
     fetch(`/api/verifikasi/${verifikasiId}`, {
       method: 'DELETE',
     }).catch((e) => console.warn('[Sync] Delete verifikasi failed:', e));
@@ -992,6 +1097,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       localStorage.setItem(STORAGE_KEYS.KECAMATAN_PROFILE, JSON.stringify(updated));
       return updated;
     });
+    saveKecamatanProfileToCloud(updated).catch((e) => console.warn('[Cloud] Kecamatan save failed:', e));
     fetch('/api/kecamatan/update', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
