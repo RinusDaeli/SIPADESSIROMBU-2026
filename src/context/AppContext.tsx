@@ -123,9 +123,13 @@ const STORAGE_KEYS = {
 };
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // One-time cleanup of legacy sample data keys
+  // One-time cleanup of legacy sample data keys and previous session logins
   useEffect(() => {
     try {
+      localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
+      localStorage.removeItem('sipad_current_user_v1');
+      localStorage.removeItem('sipades_sirombu_current_user_v2');
+      localStorage.removeItem('sipad_current_user');
       localStorage.removeItem('sipad_asets_v1');
       localStorage.removeItem('sipad_verifikasi_v1');
       localStorage.removeItem('sipad_pengesahan_v1');
@@ -167,14 +171,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return INITIAL_USERS;
   });
 
-  const [currentUser, setCurrentUser] = useState<User | null>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.CURRENT_USER);
-    if (saved) {
-      try { return JSON.parse(saved); } catch (e) { console.error(e); }
-    }
-    // Default to Super Admin so preview starts right into the dashboard
-    return INITIAL_USERS[0];
-  });
+  // Always initialize currentUser as null so opening the site requires login
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
 
   const [asets, setAsets] = useState<Aset[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.ASETS);
@@ -255,14 +253,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [users]);
 
   useEffect(() => {
-    if (currentUser) {
-      localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(currentUser));
-    } else {
-      localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
-    }
-  }, [currentUser]);
-
-  useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.ASETS, JSON.stringify(asets));
   }, [asets]);
 
@@ -294,6 +284,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     if (user) {
       setCurrentUser(user);
+      setActiveTab('dashboard');
       return { success: true };
     }
     return { success: false, message: 'Email atau kata sandi tidak cocok. Silakan periksa kembali!' };
@@ -301,6 +292,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const logout = () => {
     setCurrentUser(null);
+    setActiveTab('dashboard');
   };
 
   const switchUser = (user: User) => {
@@ -749,13 +741,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.clear();
     setDesas(INITIAL_DESA_LIST);
     setUsers(INITIAL_USERS);
-    setCurrentUser(INITIAL_USERS[0]);
+    setCurrentUser(null);
     setAsets(INITIAL_ASETS);
     setVerifikasiList(INITIAL_VERIFIKASI);
     setPengesahanList(INITIAL_PENGESAHAN);
     setKecamatanProfile(INITIAL_KECAMATAN_PROFILE);
     setSelectedYear(2026);
     setSelectedDesaFilter('all');
+    setActiveTab('dashboard');
   };
 
   return (
