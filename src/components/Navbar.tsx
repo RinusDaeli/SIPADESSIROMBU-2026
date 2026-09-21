@@ -27,6 +27,8 @@ export const Navbar: React.FC = () => {
     selectedYear,
     setSelectedYear,
     resetToDefault,
+    isServerConnected,
+    refreshServerData,
   } = useApp();
 
   const [showSwitchMenu, setShowSwitchMenu] = useState(false);
@@ -92,6 +94,17 @@ export const Navbar: React.FC = () => {
 
         {/* Right Action Bar */}
         <div className="flex items-center gap-2.5 sm:gap-4">
+          {/* Real-time Server Sync Status */}
+          <button
+            onClick={() => refreshServerData()}
+            className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 text-[11px] font-medium text-slate-300 hover:text-white transition-all cursor-pointer"
+            title="Sinkronisasi Terpusat Real-time (Klik untuk menyinkronkan data sekarang)"
+          >
+            <span className={`w-2 h-2 rounded-full ${isServerConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+            <span className="text-slate-400 font-semibold">{isServerConnected ? 'Server Terhubung' : 'Offline'}</span>
+            <RefreshCw className="w-3 h-3 text-slate-400" />
+          </button>
+
           {/* Year selector */}
           <div className="hidden sm:flex items-center gap-1.5 bg-slate-900/90 border border-slate-700/80 rounded-lg px-2.5 py-1 text-xs text-slate-300">
             <Calendar className="w-3.5 h-3.5 text-amber-400" />

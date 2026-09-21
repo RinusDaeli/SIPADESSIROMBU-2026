@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import {
   User,
   Desa,
@@ -19,6 +19,12 @@ import {
 } from '../data/initialData';
 import { formatTanggalIndonesia } from '../utils/reportGenerator';
 
+export interface AuthSession {
+  user: User;
+  loginTime: number;
+  expiresAt: number; // 24 hours timestamp
+}
+
 interface AppContextType {
   currentUser: User | null;
   users: User[];
@@ -34,6 +40,15 @@ interface AppContextType {
   setActiveTab: (tab: string) => void;
   selectedDesaFilter: string; // 'all' or desaId
   setSelectedDesaFilter: (desaId: string) => void;
+  isServerConnected: boolean;
+  lastSyncTime: Date;
+  refreshServerData: () => Promise<void>;
+  saveMasterToSourceCode: (overrides?: {
+    desas?: Desa[];
+    kecamatanProfile?: KecamatanProfile;
+    users?: User[];
+    asets?: Aset[];
+  }) => Promise<{ success: boolean; message: string }>;
   
   // Auth
   login: (email: string, pass: string) => { success: boolean; message?: string };
@@ -112,32 +127,38 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 const STORAGE_KEYS = {
-  CURRENT_USER: 'sipad_current_user_v1',
-  USERS: 'sipad_users_v1',
+  AUTH_SESSION: 'sipades_sirombu_session_24h',
+  USERS: 'sipad_users_v2',
   DESAS: 'sipad_desas_v2',
   ASETS: 'sipad_asets_v2',
   VERIFIKASI: 'sipad_verifikasi_v2',
   PENGESAHAN: 'sipad_pengesahan_v2',
-  KECAMATAN_PROFILE: 'sipad_kecamatan_profile_v1',
+  KECAMATAN_PROFILE: 'sipad_kecamatan_profile_v2',
   YEAR: 'sipad_year_v2',
 };
 
+const SESSION_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // One-time cleanup of legacy sample data keys and previous session logins
-  useEffect(() => {
+  // Session Persistence with 24-hour expiration:
+  // - If session exists and < 24 hours: remain logged in across page refreshes
+  // - If user logs out or session > 24 hours: show login page
+  const [currentUser, setCurrentUser] = useState<User | null>(() => {
     try {
-      localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
-      localStorage.removeItem('sipad_current_user_v1');
-      localStorage.removeItem('sipades_sirombu_current_user_v2');
-      localStorage.removeItem('sipad_current_user');
-      localStorage.removeItem('sipad_asets_v1');
-      localStorage.removeItem('sipad_verifikasi_v1');
-      localStorage.removeItem('sipad_pengesahan_v1');
-      localStorage.removeItem('sipad_year_v1');
+      const saved = localStorage.getItem(STORAGE_KEYS.AUTH_SESSION);
+      if (saved) {
+        const session: AuthSession = JSON.parse(saved);
+        const now = Date.now();
+        if (session && session.user && session.expiresAt && now < session.expiresAt) {
+          return session.user;
+        }
+        localStorage.removeItem(STORAGE_KEYS.AUTH_SESSION);
+      }
     } catch (e) {
-      console.error(e);
+      console.error('[Auth] Failed to parse session:', e);
     }
-  }, []);
+    return null;
+  });
 
   const [desas, setDesas] = useState<Desa[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.DESAS);
@@ -148,11 +169,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           return INITIAL_DESA_LIST.map((init) => {
             const found = parsed.find((p: Desa) => p.id === init.id);
             if (!found) return init;
-            const needsAlamatUpdate = !found.alamatDesa || found.alamatDesa.startsWith('Jl.') || !found.alamatDesa.includes('Kabupaten Nias Barat');
             return {
               ...init,
               ...found,
-              alamatDesa: needsAlamatUpdate ? init.alamatDesa : found.alamatDesa,
             };
           });
         }
@@ -171,23 +190,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return INITIAL_USERS;
   });
 
-  // Always initialize currentUser as null so opening the site requires login
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-
   const [asets, setAsets] = useState<Aset[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.ASETS);
     if (saved) {
       try {
         const parsed: Aset[] = JSON.parse(saved);
-        return parsed.map((a) => {
-          const initMatch = INITIAL_ASETS.find((ia) => ia.id === a.id);
-          return {
-            ...a,
-            klasifikasi: (a.klasifikasi ? a.klasifikasi.replace(/^[I|V|X]+\.\s*/, '') : 'Tanah') as KlasAset,
-            fotoAset: (a.fotoAset && a.fotoAset.length > 0) ? a.fotoAset : (initMatch?.fotoAset || []),
-            fotoBast: a.fotoBast || initMatch?.fotoBast || '',
-          };
-        });
+        return parsed.map((a) => ({
+          ...a,
+          klasifikasi: (a.klasifikasi ? a.klasifikasi.replace(/^[I|V|X]+\.\s*/, '') : 'Tanah') as KlasAset,
+        }));
       } catch (e) {
         console.error(e);
       }
@@ -246,8 +257,107 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [selectedDesaFilter, setSelectedDesaFilter] = useState<string>('all');
+  const [isServerConnected, setIsServerConnected] = useState<boolean>(true);
+  const [lastSyncTime, setLastSyncTime] = useState<Date>(new Date());
 
-  // Persistence effects
+  // Check 24-hour session expiry periodically
+  useEffect(() => {
+    const checkSession = () => {
+      const saved = localStorage.getItem(STORAGE_KEYS.AUTH_SESSION);
+      if (saved) {
+        try {
+          const session: AuthSession = JSON.parse(saved);
+          if (session && session.expiresAt && Date.now() >= session.expiresAt) {
+            localStorage.removeItem(STORAGE_KEYS.AUTH_SESSION);
+            setCurrentUser(null);
+            setActiveTab('dashboard');
+          }
+        } catch {
+          localStorage.removeItem(STORAGE_KEYS.AUTH_SESSION);
+          setCurrentUser(null);
+        }
+      }
+    };
+
+    const interval = setInterval(checkSession, 60000); // check every 1 minute
+    return () => clearInterval(interval);
+  }, []);
+
+  // Central Server Synchronization
+  const refreshServerData = useCallback(async () => {
+    try {
+      const res = await fetch('/api/data');
+      if (res.ok) {
+        const serverData = await res.json();
+        setIsServerConnected(true);
+        setLastSyncTime(new Date());
+
+        if (serverData) {
+          if (Array.isArray(serverData.asets)) {
+            setAsets((prev) => {
+              if (JSON.stringify(prev) === JSON.stringify(serverData.asets)) return prev;
+              localStorage.setItem(STORAGE_KEYS.ASETS, JSON.stringify(serverData.asets));
+              return serverData.asets;
+            });
+          }
+          if (Array.isArray(serverData.verifikasiList)) {
+            setVerifikasiList((prev) => {
+              if (JSON.stringify(prev) === JSON.stringify(serverData.verifikasiList)) return prev;
+              localStorage.setItem(STORAGE_KEYS.VERIFIKASI, JSON.stringify(serverData.verifikasiList));
+              return serverData.verifikasiList;
+            });
+          }
+          if (Array.isArray(serverData.users) && serverData.users.length > 0) {
+            setUsers((prev) => {
+              if (JSON.stringify(prev) === JSON.stringify(serverData.users)) return prev;
+              localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(serverData.users));
+              return serverData.users;
+            });
+          }
+          if (Array.isArray(serverData.desas) && serverData.desas.length > 0) {
+            setDesas((prev) => {
+              if (JSON.stringify(prev) === JSON.stringify(serverData.desas)) return prev;
+              localStorage.setItem(STORAGE_KEYS.DESAS, JSON.stringify(serverData.desas));
+              return serverData.desas;
+            });
+          }
+          if (serverData.kecamatanProfile) {
+            setKecamatanProfile((prev) => {
+              if (JSON.stringify(prev) === JSON.stringify(serverData.kecamatanProfile)) return prev;
+              localStorage.setItem(STORAGE_KEYS.KECAMATAN_PROFILE, JSON.stringify(serverData.kecamatanProfile));
+              return serverData.kecamatanProfile;
+            });
+          }
+          if (typeof serverData.selectedYear === 'number') {
+            setSelectedYear((prev) => {
+              if (prev === serverData.selectedYear) return prev;
+              localStorage.setItem(STORAGE_KEYS.YEAR, serverData.selectedYear.toString());
+              return serverData.selectedYear;
+            });
+          }
+        }
+      } else {
+        setIsServerConnected(false);
+      }
+    } catch (err) {
+      // Offline fallback
+      setIsServerConnected(false);
+    }
+  }, []);
+
+  // Initial load and periodic polling (every 15 seconds)
+  useEffect(() => {
+    refreshServerData();
+    const interval = setInterval(refreshServerData, 15000);
+    const onFocus = () => refreshServerData();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [refreshServerData]);
+
+  // Local storage persistence fallbacks
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
   }, [users]);
@@ -283,6 +393,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       (u) => u.email.toLowerCase() === normalizedEmail && u.password === pass.trim()
     );
     if (user) {
+      const now = Date.now();
+      const session: AuthSession = {
+        user,
+        loginTime: now,
+        expiresAt: now + SESSION_DURATION_MS, // 24 hours
+      };
+      localStorage.setItem(STORAGE_KEYS.AUTH_SESSION, JSON.stringify(session));
       setCurrentUser(user);
       setActiveTab('dashboard');
       return { success: true };
@@ -291,11 +408,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const logout = () => {
+    localStorage.removeItem(STORAGE_KEYS.AUTH_SESSION);
     setCurrentUser(null);
     setActiveTab('dashboard');
   };
 
   const switchUser = (user: User) => {
+    const now = Date.now();
+    const session: AuthSession = {
+      user,
+      loginTime: now,
+      expiresAt: now + SESSION_DURATION_MS,
+    };
+    localStorage.setItem(STORAGE_KEYS.AUTH_SESSION, JSON.stringify(session));
     setCurrentUser(user);
   };
 
@@ -313,70 +438,132 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAt: new Date().toISOString(),
     };
     setUsers((prev) => [newUser, ...prev]);
+
+    // Push to server
+    fetch('/api/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user: newUser, requestRole: currentUser?.role }),
+    }).catch((e) => console.warn('[Sync] User add failed:', e));
+
     return { success: true };
   };
 
   const updateUser = (id: string, data: Partial<User>) => {
     const target = users.find((u) => u.id === id);
     if (target?.role === 'super_admin' && currentUser?.role !== 'super_admin') {
-      return { success: false, message: 'Tidak memiliki izin untuk mengubah data akun Super Admin!' };
+      return { success: false, message: 'Hanya Super Admin yang berhak mengubah akun Super Admin!' };
     }
     if (data.role === 'super_admin' && currentUser?.role !== 'super_admin') {
-      return { success: false, message: 'Tidak memiliki hak akses untuk mengubah peran ke Super Admin!' };
+      return { success: false, message: 'Hanya Super Admin yang dapat menetapkan peran Super Admin!' };
     }
-    if (data.email && users.some((u) => u.id !== id && u.email.toLowerCase() === data.email?.toLowerCase())) {
-      return { success: false, message: 'Email / ID pengguna sudah digunakan akun lain!' };
-    }
+
     setUsers((prev) =>
       prev.map((u) => (u.id === id ? { ...u, ...data } : u))
     );
+
     if (currentUser?.id === id) {
-      setCurrentUser((prev) => (prev ? { ...prev, ...data } : null));
+      const updatedSelf = { ...currentUser, ...data };
+      setCurrentUser(updatedSelf);
+      const saved = localStorage.getItem(STORAGE_KEYS.AUTH_SESSION);
+      if (saved) {
+        try {
+          const sess: AuthSession = JSON.parse(saved);
+          sess.user = updatedSelf;
+          localStorage.setItem(STORAGE_KEYS.AUTH_SESSION, JSON.stringify(sess));
+        } catch {
+          // ignore
+        }
+      }
     }
+
+    // Push to server
+    fetch(`/api/users/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data, requestRole: currentUser?.role }),
+    }).catch((e) => console.warn('[Sync] User update failed:', e));
+
     return { success: true };
   };
 
   const deleteUser = (id: string) => {
     const target = users.find((u) => u.id === id);
-    if (!target) return { success: false, message: 'User tidak ditemukan' };
-    if (target.email === 'udniat.01@gmail.com' || target.role === 'super_admin') {
-      if (currentUser?.role !== 'super_admin') {
-        return { success: false, message: 'Tidak memiliki izin untuk menghapus akun Super Admin!' };
-      }
-      if (target.email === 'udniat.01@gmail.com') {
-        return { success: false, message: 'Super Admin utama tidak dapat dihapus!' };
-      }
+    if (!target) return { success: false, message: 'Pengguna tidak ditemukan!' };
+
+    if (target.email === 'udniat.01@gmail.com') {
+      return { success: false, message: 'Akun Super Admin Utama tidak dapat dihapus!' };
     }
+
+    if (currentUser?.role !== 'super_admin') {
+      return { success: false, message: 'Hanya Super Admin yang berhak menghapus akun pengguna!' };
+    }
+
     if (currentUser?.id === id) {
       return { success: false, message: 'Tidak dapat menghapus akun yang sedang aktif digunakan!' };
     }
+
     setUsers((prev) => prev.filter((u) => u.id !== id));
+
+    fetch(`/api/users/${id}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestRole: currentUser?.role }),
+    }).catch((e) => console.warn('[Sync] User delete failed:', e));
+
     return { success: true };
   };
 
-  // Asset Handlers
+  // Asset Management
   const addAset = (data: Omit<Aset, 'id' | 'createdAt' | 'updatedAt' | 'status'>) => {
+    const desa = desas.find((d) => d.id === data.desaId);
+    const now = new Date().toISOString();
     const newAset: Aset = {
       ...data,
-      id: `ast-${Date.now()}`,
+      id: `ast-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      desaName: desa?.name || 'Desa',
       status: 'aktif',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      createdAt: now,
+      updatedAt: now,
     };
+
     setAsets((prev) => [newAset, ...prev]);
+
+    // Push to central server so admin sees it instantly from anywhere
+    fetch('/api/asets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newAset),
+    }).catch((e) => console.warn('[Sync] Asset add failed:', e));
   };
 
   const updateAset = (id: string, data: Partial<Aset>) => {
-    setAsets((prev) =>
-      prev.map((a) =>
-        a.id === id ? { ...a, ...data, updatedAt: new Date().toISOString() } : a
-      )
-    );
+    setAsets((prev) => {
+      const updated = prev.map((a) => {
+        if (a.id === id) {
+          return {
+            ...a,
+            ...data,
+            updatedAt: new Date().toISOString(),
+          };
+        }
+        return a;
+      });
+      const target = updated.find((a) => a.id === id);
+      if (target) {
+        fetch(`/api/asets/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(target),
+        }).catch((e) => console.warn('[Sync] Asset update failed:', e));
+      }
+      return updated;
+    });
   };
 
   const deleteAset = (id: string) => {
     const target = asets.find((a) => a.id === id);
-    if (!target) return { success: false, message: 'Aset tidak ditemukan' };
+    if (!target) return { success: false, message: 'Aset tidak ditemukan!' };
     if (target.status === 'mutasi_diajukan' || target.status === 'terhapus_diajukan') {
       return {
         success: false,
@@ -384,6 +571,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
     setAsets((prev) => prev.filter((a) => a.id !== id));
+
+    fetch(`/api/asets/${id}`, {
+      method: 'DELETE',
+    }).catch((e) => console.warn('[Sync] Asset delete failed:', e));
+
     return { success: true };
   };
 
@@ -415,6 +607,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setVerifikasiList((prev) => [newReq, ...prev]);
     updateAset(asetId, { status: 'mutasi_diajukan' });
+
+    fetch('/api/verifikasi', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newReq),
+    }).catch((e) => console.warn('[Sync] Mutasi request failed:', e));
   };
 
   const ajukanPenghapusan = (
@@ -442,6 +640,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setVerifikasiList((prev) => [newReq, ...prev]);
     updateAset(asetId, { status: 'terhapus_diajukan' });
+
+    fetch('/api/verifikasi', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newReq),
+    }).catch((e) => console.warn('[Sync] Penghapusan request failed:', e));
   };
 
   const prosesVerifikasi = (
@@ -455,6 +659,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const verifierName = currentUser?.name || 'Admin Kecamatan Sirombu';
     const now = new Date().toISOString();
+    const finalSK = nomorSKKecamatan || (status === 'disetujui' ? `SK-KEC-SRB/${new Date().getFullYear()}/${verif.id.slice(-4)}` : undefined);
 
     setVerifikasiList((prev) =>
       prev.map((v) =>
@@ -465,13 +670,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               tanggalDiproses: now,
               diverifikasiOleh: verifierName,
               catatanKecamatan,
-              nomorSKKecamatan: nomorSKKecamatan || (status === 'disetujui' ? `SK-KEC-SRB/${new Date().getFullYear()}/${v.id.slice(-4)}` : undefined),
+              nomorSKKecamatan: finalSK,
             }
           : v
       )
     );
 
-    // Update the asset status accordingly
+    fetch(`/api/verifikasi/${verifikasiId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status,
+        tanggalDiproses: now,
+        diverifikasiOleh: verifierName,
+        catatanKecamatan,
+        nomorSKKecamatan: finalSK,
+      }),
+    }).catch((e) => console.warn('[Sync] Process verifikasi failed:', e));
+
+    // Update asset status
     const targetAset = asets.find((a) => a.id === verif.asetId);
     const prevKeterangan = targetAset?.keterangan ? targetAset.keterangan.trim() : '';
     const prefixKet = prevKeterangan ? `${prevKeterangan} | ` : '';
@@ -481,13 +698,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (verif.tipe === 'penghapusan') {
         updateAset(verif.asetId, {
           status: 'terhapus',
-          keterangan: `${prefixKet}Telah dihapus pada tanggal ${tanggalFormatted} (SK Kecamatan Sirombu No. ${nomorSKKecamatan || 'SK-KEC-SRB'}. Alasan: ${verif.alasan})`,
+          keterangan: `${prefixKet}Telah dihapus pada tanggal ${tanggalFormatted} (SK Kecamatan Sirombu No. ${finalSK || 'SK-KEC-SRB'}. Alasan: ${verif.alasan})`,
         });
       } else if (verif.tipe === 'mutasi') {
         const tujuanClean = (verif.tujuanMutasi || '').trim();
-        const keteranganMutasi = `${prefixKet}Telah dilakukan mutasi dari ${verif.desaName} ke ${tujuanClean} pada tanggal ${tanggalFormatted} (SK Kecamatan Sirombu No. ${nomorSKKecamatan || 'SK-KEC-SRB'})`;
+        const keteranganMutasi = `${prefixKet}Telah dilakukan mutasi dari ${verif.desaName} ke ${tujuanClean} pada tanggal ${tanggalFormatted} (SK Kecamatan Sirombu No. ${finalSK || 'SK-KEC-SRB'})`;
 
-        // Periksa apakah tujuan mutasi adalah salah satu desa di Kecamatan Sirombu
         const targetDesa = desas.find((d) => {
           const dNameClean = d.name.toLowerCase().replace(/^desa\s+/i, '').trim();
           const tClean = tujuanClean.toLowerCase().replace(/^desa\s+/i, '').trim();
@@ -500,7 +716,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
 
         if (targetDesa && targetDesa.id !== verif.desaId) {
-          // Aset berpindah ke desa tujuan penerima di Kecamatan Sirombu
           updateAset(verif.asetId, {
             desaId: targetDesa.id,
             desaName: targetDesa.name,
@@ -508,7 +723,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             keterangan: keteranganMutasi,
           });
         } else {
-          // Mutasi ke luar desa / instansi eksternal
           updateAset(verif.asetId, {
             status: 'terhapus',
             keterangan: keteranganMutasi,
@@ -516,7 +730,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
     } else {
-      // Revert asset status back to active if rejected
       updateAset(verif.asetId, {
         status: 'aktif',
         keterangan: `${verif.asetSnapshot.keterangan || ''} (Pengajuan ${verif.tipe} ditolak Kecamatan: ${catatanKecamatan})`,
@@ -524,7 +737,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // Approval Laporan Tahunan
   const ajukanPengesahan = (desaId: string, tahun: number) => {
     const desa = desas.find((d) => d.id === desaId);
     const desaName = desa ? desa.name : 'DESA';
@@ -592,13 +804,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateDesa = (id: string, data: Partial<Desa>) => {
-    setDesas((prev) =>
-      prev.map((d) => (d.id === id ? { ...d, ...data } : d))
-    );
+    let finalDesas: Desa[] = [];
+    setDesas((prev) => {
+      finalDesas = prev.map((d) => (d.id === id ? { ...d, ...data } : d));
+      localStorage.setItem(STORAGE_KEYS.DESAS, JSON.stringify(finalDesas));
+      return finalDesas;
+    });
+
+    const target = desas.find((d) => d.id === id);
+    const updated = target ? { ...target, ...data } : null;
+    if (updated) {
+      fetch('/api/desa/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updated),
+      }).catch((e) => console.warn('[Sync] Desa update failed:', e));
+    }
+
     return { success: true };
   };
 
-  // Revisi mutasi yang sebelumnya ditolak oleh Kecamatan
   const revisiMutasi = (
     verifikasiId: string,
     data: {
@@ -631,22 +856,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       )
     );
 
-    // Update status aset kembali ke 'mutasi_diajukan' atau 'terhapus_diajukan'
     const newStatus = target.tipe === 'mutasi' ? 'mutasi_diajukan' : 'terhapus_diajukan';
     updateAset(target.asetId, {
       status: newStatus,
       keterangan: `${target.asetSnapshot.keterangan || ''} (Revisi permohonan telah diajukan kembali ke Kecamatan Sirombu)`,
     });
 
+    fetch(`/api/verifikasi/${verifikasiId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        alasan: data.alasan,
+        nomorSuratDesa: data.nomorSuratDesa,
+        dokumenPendukung: data.dokumenPendukung,
+        tujuanMutasi: data.tujuanMutasi ?? target.tujuanMutasi,
+        status: 'menunggu_verifikasi',
+        tanggalPengajuan: now,
+      }),
+    }).catch((e) => console.warn('[Sync] Revisi mutasi failed:', e));
+
     return { success: true, message: 'Permohonan berhasil direvisi dan diajukan ulang!' };
   };
 
-  // Hapus permohonan mutasi oleh admin/super admin
   const deleteVerifikasi = (verifikasiId: string) => {
     const target = verifikasiList.find((v) => v.id === verifikasiId);
     if (!target) return { success: false, message: 'Data permohonan tidak ditemukan!' };
 
-    // Kembalikan status aset ke 'aktif' jika saat ini masih mutasi_diajukan atau terhapus_diajukan
     const relatedAset = asets.find((a) => a.id === target.asetId);
     if (relatedAset && (relatedAset.status === 'mutasi_diajukan' || relatedAset.status === 'terhapus_diajukan')) {
       updateAset(target.asetId, {
@@ -655,14 +890,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     setVerifikasiList((prev) => prev.filter((v) => v.id !== verifikasiId));
+
+    fetch(`/api/verifikasi/${verifikasiId}`, {
+      method: 'DELETE',
+    }).catch((e) => console.warn('[Sync] Delete verifikasi failed:', e));
+
     return { success: true, message: 'Data permohonan mutasi berhasil dihapus!' };
   };
 
-  // Backup & Restore
   const getBackupData = () => {
     return {
       appName: 'SIPADES SIROMBU - Nias Barat',
-      version: '1.0.0',
+      version: '2.0.0',
       exportDate: new Date().toISOString(),
       timestamp: Date.now(),
       data: {
@@ -717,9 +956,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setSelectedYear(payload.selectedYear);
       }
 
+      // Sync restored data to central server
+      fetch('/api/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          desas: payload.desas,
+          users: payload.users,
+          asets: payload.asets,
+          verifikasiList: payload.verifikasiList,
+          kecamatanProfile: payload.kecamatanProfile,
+          selectedYear: payload.selectedYear,
+        }),
+      }).catch((e) => console.warn('[Sync] Restore sync failed:', e));
+
       return {
         success: true,
-        message: 'Data SIPADES berhasil dipulihkan secara menyeluruh!',
+        message: 'Data SIPADES berhasil dipulihkan dan disinkronkan ke server!',
         stats: {
           asets: Array.isArray(payload.asets) ? payload.asets.length : 0,
           verifikasi: Array.isArray(payload.verifikasiList) ? payload.verifikasiList.length : 0,
@@ -733,12 +986,60 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateKecamatanProfile = (data: Partial<KecamatanProfile>) => {
-    setKecamatanProfile((prev) => ({ ...prev, ...data }));
+    let updated: KecamatanProfile = kecamatanProfile;
+    setKecamatanProfile((prev) => {
+      updated = { ...prev, ...data };
+      localStorage.setItem(STORAGE_KEYS.KECAMATAN_PROFILE, JSON.stringify(updated));
+      return updated;
+    });
+    fetch('/api/kecamatan/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updated),
+    }).catch((e) => console.warn('[Sync] Kecamatan update failed:', e));
     return { success: true, message: 'Data Camat & Kantor Kecamatan Sirombu berhasil diperbarui!' };
+  };
+
+  const saveMasterToSourceCode = async (overrides?: {
+    desas?: Desa[];
+    kecamatanProfile?: KecamatanProfile;
+    users?: User[];
+    asets?: Aset[];
+  }): Promise<{ success: boolean; message: string }> => {
+    try {
+      const payloadDesas = overrides?.desas || desas;
+      const payloadKecamatan = overrides?.kecamatanProfile || kecamatanProfile;
+      const payloadUsers = overrides?.users || users;
+      const payloadAsets = overrides?.asets || asets;
+
+      const response = await fetch('/api/sync-master', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          desas: payloadDesas,
+          kecamatanProfile: payloadKecamatan,
+          users: payloadUsers,
+          asets: payloadAsets,
+        }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        setIsServerConnected(true);
+        setLastSyncTime(new Date());
+        return {
+          success: true,
+          message: 'Semua data berhasil disimpan permanen ke Master Source Code (src/data/initialData.ts) dan Basis Data Server. Aman untuk di-share ke GitHub tanpa kembali ke setelan awal!',
+        };
+      }
+      return { success: false, message: data.message || 'Gagal menyimpan ke master source code.' };
+    } catch (err: any) {
+      return { success: false, message: `Gagal menghubungkan ke server: ${err?.message || 'Koneksi terputus'}` };
+    }
   };
 
   const resetToDefault = () => {
     localStorage.clear();
+    fetch('/api/reset', { method: 'POST' }).catch(() => {});
     setDesas(INITIAL_DESA_LIST);
     setUsers(INITIAL_USERS);
     setCurrentUser(null);
@@ -768,6 +1069,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setActiveTab,
         selectedDesaFilter,
         setSelectedDesaFilter,
+        isServerConnected,
+        lastSyncTime,
+        refreshServerData,
         login,
         logout,
         switchUser,
@@ -787,6 +1091,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         getBackupData,
         restoreBackupData,
         updateDesa,
+        saveMasterToSourceCode,
         resetToDefault,
       }}
     >
@@ -795,7 +1100,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
 };
 
-export const useApp = () => {
+export const useApp = (): AppContextType => {
   const context = useContext(AppContext);
   if (!context) {
     throw new Error('useApp must be used within an AppProvider');

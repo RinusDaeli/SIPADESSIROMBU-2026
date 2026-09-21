@@ -71,6 +71,64 @@ export const ROMAN_KLASIFIKASI: RomanKlasifikasi[] = [
   { roman: 'X', title: 'KONSTRUKSI DALAM PENGERJAAN', key: 'Konstruksi dalam Pengerjaan' },
 ];
 
+export const KLASIFIKASI_KODE_PREFIX: Record<KlasAset, string> = {
+  'Tanah': '01.01.01',
+  'Peralatan, Mesin, dan Alat Berat': '02.01.01',
+  'Kendaraan': '02.02.01',
+  'Gedung dan Bangunan': '03.01.01',
+  'Jalan': '04.01.01',
+  'Jembatan': '04.02.01',
+  'Irigasi/Embung/Air Sungai/Drainase': '04.03.01',
+  'Jaringan/Instalasi': '04.04.01',
+  'Aset Tetap Lainnya': '05.01.01',
+  'Konstruksi dalam Pengerjaan': '06.01.01',
+};
+
+/**
+ * Generate standard Permendagri No. 1/2016 Asset Code / Register Number automatically
+ * Format: [Golongan.Bidang.Kelompok].[KodeDesa].[NomorRegister]
+ * Example: 01.01.01.21.0001 (Tanah pertama di Desa Sirombu)
+ */
+export const generateAutoKodeAset = (
+  desaId: string,
+  klasifikasi: KlasAset,
+  existingAsets: Aset[] = [],
+  desasList: Desa[] = []
+): string => {
+  const prefix = KLASIFIKASI_KODE_PREFIX[klasifikasi] || '01.01.01';
+
+  let desaCodeNumber = '01';
+  const matchedDesa = desasList.find((d) => d.id === desaId);
+  if (matchedDesa && matchedDesa.code) {
+    const parts = matchedDesa.code.split('.');
+    const last = parts[parts.length - 1];
+    desaCodeNumber = last.length >= 2 ? last.slice(-2) : last.padStart(2, '0');
+  } else if (desaId.startsWith('desa-')) {
+    desaCodeNumber = desaId.replace('desa-', '').padStart(2, '0');
+  }
+
+  const basePattern = `${prefix}.${desaCodeNumber}.`;
+
+  let maxSeq = 0;
+  for (const a of existingAsets) {
+    if (a.desaId === desaId) {
+      if (a.kodeAset && a.kodeAset.startsWith(basePattern)) {
+        const parts = a.kodeAset.split('.');
+        const lastPart = parts[parts.length - 1];
+        const num = parseInt(lastPart, 10);
+        if (!isNaN(num) && num > maxSeq) {
+          maxSeq = num;
+        }
+      } else if (a.klasifikasi === klasifikasi) {
+        maxSeq++;
+      }
+    }
+  }
+
+  const nextRegister = String(maxSeq + 1).padStart(4, '0');
+  return `${basePattern}${nextRegister}`;
+};
+
 export interface PermendagriPdfOptions {
   desa?: Desa;
   allDesas?: Desa[];

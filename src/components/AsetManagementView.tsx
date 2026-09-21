@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
 import { Aset, KlasAset, KondisiAset, SumberDana } from '../types';
-import { KLASIFIKASI_LIST, formatRupiah, formatNumber } from '../utils/reportGenerator';
+import { KLASIFIKASI_LIST, formatRupiah, formatNumber, generateAutoKodeAset } from '../utils/reportGenerator';
 import { BarcodeModal } from './BarcodeModal';
 import { AsetDetailModal } from './AsetDetailModal';
 import { fileToCompressedDataUrl } from '../utils/imageCompressor';
@@ -26,7 +26,9 @@ import {
   Camera,
   Eye,
   QrCode,
-  FileCheck2
+  FileCheck2,
+  RefreshCw,
+  Sparkles,
 } from 'lucide-react';
 
 export const AsetManagementView: React.FC = () => {
@@ -178,11 +180,15 @@ export const AsetManagementView: React.FC = () => {
   // Open add modal
   const handleOpenAdd = () => {
     setPhotoError('');
+    const targetDesaId = isDesaUser ? currentUser.desaId || 'desa-21' : desas[0]?.id || 'desa-01';
+    const targetKlas: KlasAset = 'Tanah';
+    const autoKode = generateAutoKodeAset(targetDesaId, targetKlas, asets, desas);
+
     setFormData({
-      desaId: isDesaUser ? currentUser.desaId || 'desa-21' : desas[0]?.id || 'desa-01',
-      klasifikasi: 'Tanah',
+      desaId: targetDesaId,
+      klasifikasi: targetKlas,
       namaAset: '',
-      kodeAset: '',
+      kodeAset: autoKode,
       buktiJenis: 'Kwitansi / BAST',
       buktiNomor: '',
       buktiTanggal: new Date().toLocaleDateString('id-ID'),
@@ -238,12 +244,16 @@ export const AsetManagementView: React.FC = () => {
     }
 
     const desa = desas.find((d) => d.id === formData.desaId);
+    const finalKodeAset = (formData.kodeAset && formData.kodeAset.trim().length > 0)
+      ? formData.kodeAset.trim()
+      : generateAutoKodeAset(formData.desaId, formData.klasifikasi, asets, desas);
+
     addAset({
       desaId: formData.desaId,
       desaName: desa?.name || 'DESA',
       klasifikasi: formData.klasifikasi,
       namaAset: formData.namaAset,
-      kodeAset: formData.kodeAset || `0${KLASIFIKASI_LIST.indexOf(formData.klasifikasi) + 1}.01.${Date.now().toString().slice(-4)}`,
+      kodeAset: finalKodeAset,
       bukti: {
         jenis: formData.buktiJenis,
         nomor: formData.buktiNomor,
@@ -747,7 +757,11 @@ export const AsetManagementView: React.FC = () => {
                   <select
                     disabled={isDesaUser}
                     value={formData.desaId}
-                    onChange={(e) => setFormData({ ...formData, desaId: e.target.value })}
+                    onChange={(e) => {
+                      const newDesaId = e.target.value;
+                      const autoKode = generateAutoKodeAset(newDesaId, formData.klasifikasi, asets, desas);
+                      setFormData({ ...formData, desaId: newDesaId, kodeAset: autoKode });
+                    }}
                     className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-amber-400"
                   >
                     {desas.map((d) => (
@@ -765,7 +779,11 @@ export const AsetManagementView: React.FC = () => {
                   </label>
                   <select
                     value={formData.klasifikasi}
-                    onChange={(e) => setFormData({ ...formData, klasifikasi: e.target.value as KlasAset })}
+                    onChange={(e) => {
+                      const newKlas = e.target.value as KlasAset;
+                      const autoKode = generateAutoKodeAset(formData.desaId, newKlas, asets, desas);
+                      setFormData({ ...formData, klasifikasi: newKlas, kodeAset: autoKode });
+                    }}
                     className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-amber-400"
                   >
                     {KLASIFIKASI_LIST.map((k) => (
@@ -834,16 +852,39 @@ export const AsetManagementView: React.FC = () => {
               {/* Kode Aset & Tahun Perolehan */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
-                  <label className="block font-semibold text-slate-300 mb-1">
-                    Kode Aset Tetap
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block font-semibold text-slate-300 text-xs">
+                      Kode Aset Tetap / ID Register
+                    </label>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-1.5 py-0.2 rounded font-medium flex items-center gap-1">
+                        <Sparkles className="w-2.5 h-2.5 text-emerald-400" />
+                        Otomatis
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const freshKode = generateAutoKodeAset(formData.desaId, formData.klasifikasi, asets, desas);
+                          setFormData((prev) => ({ ...prev, kodeAset: freshKode }));
+                        }}
+                        className="text-[10px] text-amber-400 hover:text-amber-300 flex items-center gap-1 hover:underline cursor-pointer"
+                        title="Buat ulang nomor register urut otomatis"
+                      >
+                        <RefreshCw className="w-2.5 h-2.5" />
+                        Perbarui
+                      </button>
+                    </div>
+                  </div>
                   <input
                     type="text"
-                    placeholder="Contoh: 01.01.01.04.001"
+                    placeholder="Contoh: 01.01.01.21.0001"
                     value={formData.kodeAset}
                     onChange={(e) => setFormData({ ...formData, kodeAset: e.target.value })}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-emerald-400 font-mono text-sm font-semibold tracking-wider focus:outline-none focus:border-amber-400"
                   />
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    Format: <span className="font-mono text-slate-300">Golongan.Bidang.Desa.Urut</span>
+                  </p>
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-300 mb-1">
@@ -1217,14 +1258,28 @@ export const AsetManagementView: React.FC = () => {
               {/* Kode Aset & Nilai */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
-                  <label className="block font-semibold text-slate-300 mb-1">
-                    Kode Aset Tetap
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block font-semibold text-slate-300 text-xs">
+                      Kode Aset Tetap
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const freshKode = generateAutoKodeAset(formData.desaId, formData.klasifikasi, asets, desas);
+                        setFormData((prev) => ({ ...prev, kodeAset: freshKode }));
+                      }}
+                      className="text-[10px] text-amber-400 hover:text-amber-300 flex items-center gap-1 hover:underline cursor-pointer"
+                      title="Hitung kode register otomatis"
+                    >
+                      <RefreshCw className="w-2.5 h-2.5" />
+                      Set Otomatis
+                    </button>
+                  </div>
                   <input
                     type="text"
                     value={formData.kodeAset}
                     onChange={(e) => setFormData({ ...formData, kodeAset: e.target.value })}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono text-xs focus:outline-none focus:border-amber-400"
                   />
                 </div>
                 <div>
